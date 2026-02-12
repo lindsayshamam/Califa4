@@ -1,0 +1,191 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Garden Pro: Final Layout</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/suncalc@1.9.0/suncalc.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: -apple-system, sans-serif; background: #050505; color: white; }
+        #ui { position: absolute; bottom: 8px; left: 2%; width: 96%; background: rgba(255,255,255,0.95); padding: 6px; border-radius: 12px; z-index: 100; color: #333; display: flex; flex-direction: column; gap: 2px; box-sizing: border-box;}
+        #inspector { position: absolute; top: 8px; left: 2%; width: 96%; background: rgba(0,0,0,0.85); padding: 10px; border-radius: 12px; font-size: 11px; border: 1px solid #ffcc00; box-sizing: border-box; z-index: 101;}
+        select { width: 100%; padding: 6px; border-radius: 5px; font-size: 13px; margin-bottom: 4px; }
+        input[type=range] { width: 100%; height: 12px; accent-color: #d32f2f; margin: 0; }
+        .label-row { display: flex; justify-content: space-between; font-size: 8px; color: #555; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="inspector">
+        <select id="plantSelect" onchange="autoHighlight()">
+            <optgroup label="Permanent Trees (High Sun)">
+                <option value="8">Citrus, Avocado, Fig (8h+)</option>
+                <option value="8">Bougainvillea (8h+)</option>
+            </optgroup>
+            <optgroup label="Deciduous (Chill/Winter Shade)">
+                <option value="7">Apples, Peaches, Plums (7h+)</option>
+                <option value="7">Reliance Grapes (7h+)</option>
+            </optgroup>
+            <optgroup label="Garden Staples">
+                <option value="8">Tomatoes & Peppers (8h+)</option>
+                <option value="5">Herbs & Jasmine (5h+)</option>
+            </optgroup>
+        </select>
+        <div id="result">Tap square for local data.</div>
+        <div style="color:#ffcc00; font-weight:bold; margin-top:4px;">✨ Gold squares = Best Yearly Spots</div>
+    </div>
+
+    <div id="ui">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span id="sun-info" style="font-size:9px; font-weight:bold;">Awaiting GPS...</span>
+            <div style="font-size:8px; color:#d32f2f;">WEST ← YARD → EAST</div>
+            <button onclick="toggleView()" style="padding:4px 8px; background:#2e7d32; color:white; border:none; border-radius:5px; font-size:10px;">🔄 View</button>
+        </div>
+        <input type="range" id="timeSlider" min="0" max="1439" value="720">
+        <input type="range" id="daySlider" min="0" max="364" value="172">
+        <div class="label-row"><span>JAN (WINTER)</span><span>JUN (SUMMER)</span><span>DEC</span></div>
+    </div>
+
+    <script>
+        let isBirdsEye = false;
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.1, 1000); // Lowered FOV to zoom out
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a2e1a });
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(52, 36), groundMat);
+        ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true;
+        scene.add(ground);
+
+        scene.add(new THREE.GridHelper(52, 26, 0x444444, 0x222222));
+        
+        const highlighters = [];
+        for(let i=0; i<3; i++) {
+            const h = new THREE.Mesh(new THREE.PlaneGeometry(2,2), new THREE.MeshBasicMaterial({color: 0xffcc00, transparent:true, opacity:0.75}));
+            h.rotation.x = -Math.PI/2; h.position.y = 0.15; h.visible = false;
+            scene.add(h); highlighters.push(h);
+        }
+
+        const selector = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({color: 0xffffff, transparent: true, opacity: 0.5}));
+        selector.rotation.x = -Math.PI / 2; selector.position.y = 0.1; scene.add(selector);
+
+        function addObj(w,h,d,x,y,z,c=0xeeeeee) {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshStandardMaterial({color:c}));
+            m.position.set(x,y,z); m.castShadow = true; m.receiveShadow = true; scene.add(m);
+        }
+        addObj(52, 12, 10, 0, 6, -23, 0x4a90e2); // North House
+        addObj(52, 8, 0.5, 0, 4, 18, 0xffffff);  // 8ft South Wall
+        addObj(0.5, 6, 36, 26, 3, 0, 0xcccccc); // 6ft East Wall
+        addObj(0.5, 6, 36, -26, 3, 0, 0xcccccc); // 6ft West Wall
+
+        // Playground (Visual only, no shadow logic in getSunAtDate)
+        const play = new THREE.Mesh(new THREE.BoxGeometry(8, 6, 10), new THREE.MeshStandardMaterial({color:0x8d6e63, transparent:true, opacity:0.6}));
+        play.position.set(-18, 3, -3); scene.add(play);
+
+        function addTree(h,r,x,z,c=0x1b5e20) {
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, h/2), new THREE.MeshStandardMaterial({color:0x3e2723}));
+            trunk.position.set(x, h/4, z); trunk.castShadow = true; scene.add(trunk);
+            const foliage = new THREE.Mesh(new THREE.SphereGeometry(r), new THREE.MeshStandardMaterial({color:c, transparent:true, opacity:0.8}));
+            foliage.position.set(x, h*0.8, z); foliage.castShadow = true; scene.add(foliage);
+        }
+        addTree(26, 9, -28, 18); // Neighbor SW
+        addTree(12, 4, 21, 13);  // Corner SE
+        addTree(6, 3, 6, 6, 0x556b2f); // Oak 6W, 6S
+
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        sunLight.castShadow = true;
+        sunLight.shadow.camera.left = -40; sunLight.shadow.camera.right = 40;
+        sunLight.shadow.camera.top = 40; sunLight.shadow.camera.bottom = -40;
+        sunLight.shadow.mapSize.set(2048, 2048);
+        scene.add(sunLight);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        window.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('#ui') || e.target.closest('#inspector')) return;
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(ground);
+            if (intersects.length > 0) {
+                selector.position.x = Math.round(intersects[0].point.x / 2) * 2;
+                selector.position.z = Math.round(intersects[0].point.z / 2) * 2;
+                updateAnalysis();
+            }
+        });
+
+        let lat = 34.05, lng = -118.24;
+        navigator.geolocation.getCurrentPosition(p => { lat = p.coords.latitude; lng = p.coords.longitude; updateSun(); autoHighlight(); });
+
+        function getSunAtDate(x, z, dayIndex) {
+            const d = new Date(new Date().getFullYear(), 0, 1);
+            d.setDate(d.getDate() + dayIndex);
+            let mins = 0;
+            for(let i=420; i<1140; i+=60) {
+                d.setHours(Math.floor(i/60), 0);
+                const pos = SunCalc.getPosition(d, lat, lng);
+                if(pos.altitude > 0.1) {
+                    let blocked = false;
+                    if (z > 14 && pos.altitude < 0.35) blocked = true; // South Wall
+                    if (x > 22 && pos.azimuth < -1.2) blocked = true; // East Wall shadow (Morning)
+                    if (x < -22 && pos.azimuth > 1.2) blocked = true; // West Wall shadow (Evening)
+                    if (x < -18 && z > 10 && pos.azimuth > 0) blocked = true; // Big Tree
+                    if (!blocked) mins += 60;
+                }
+            }
+            return mins/60;
+        }
+
+        function updateAnalysis() {
+            const summer = getSunAtDate(selector.position.x, selector.position.z, 172);
+            const winter = getSunAtDate(selector.position.x, selector.position.z, 355);
+            document.getElementById('result').innerHTML = `<b>Yearly Exposure:</b> Summer ${summer.toFixed(1)}h | Winter ${winter.toFixed(1)}h`;
+        }
+
+        function autoHighlight() {
+            let spots = [];
+            for(let x=-22; x<=22; x+=4) {
+                for(let z=-14; z<=14; z+=4) {
+                    const summer = getSunAtDate(x, z, 172);
+                    const winter = getSunAtDate(x, z, 355);
+                    spots.push({x, z, h: (summer + winter)/2});
+                }
+            }
+            spots.sort((a,b) => b.h - a.h);
+            for(let i=0; i<3; i++) {
+                highlighters[i].position.set(spots[i].x, 0.15, spots[i].z);
+                highlighters[i].visible = true;
+            }
+        }
+
+        function toggleView() {
+            isBirdsEye = !isBirdsEye;
+            if(isBirdsEye) { camera.position.set(0, 70, 0); camera.lookAt(0,0,0); }
+            else { camera.position.set(0, 50, 45); camera.lookAt(0,0,0); }
+        }
+
+        function updateSun() {
+            const day = document.getElementById('daySlider').value;
+            const mins = document.getElementById('timeSlider').value;
+            const d = new Date(new Date().getFullYear(), 0, 1); d.setDate(d.getDate() + parseInt(day)); d.setHours(Math.floor(mins/60), mins%60);
+            const pos = SunCalc.getPosition(d, lat, lng);
+            const dist = 100;
+            sunLight.position.set(-dist*Math.sin(pos.azimuth)*Math.cos(pos.altitude), dist*Math.sin(pos.altitude), dist*Math.cos(pos.azimuth)*Math.cos(pos.altitude));
+            let hue = 0.66; if (pos.altitude > 0) hue = 0.66 - (Math.sin(pos.altitude) * 0.66);
+            groundMat.color.setHSL(hue, 0.6, 0.15);
+            document.getElementById('sun-info').innerText = `${d.toLocaleDateString()} @ ${d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+            scene.background.setHex(pos.altitude > 0 ? 0x87ceeb : 0x050510);
+            sunLight.intensity = pos.altitude > 0 ? 1.2 : 0;
+        }
+
+        document.querySelectorAll('input').forEach(i => i.addEventListener('input', updateSun));
+        function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+        animate(); toggleView(); toggleView(); // Init
+    </script>
+</body>
+</html>
